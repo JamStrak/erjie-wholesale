@@ -3,9 +3,30 @@ export const uid = () => globalThis.crypto.randomUUID();
 export function emptyData() { return {version:2,demo:false,products:[],customers:[],quotes:[],settings:{targetMargin:25},updatedAt:null}; }
 export function demoData() {
   return { ...emptyData(),demo:true,products:[
-    {id:'demo-bag',name:'日常帆布托特包',category:'包包',cost:22,wholesalePrice:30,retail:59,packaging:1,supplier:'示例厂家 A',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:20},{minQty:100,cost:18}]},
-    {id:'demo-hat',name:'百搭软檐棒球帽',category:'帽子',cost:12,wholesalePrice:18,retail:35,packaging:0.5,supplier:'示例厂家 B',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:10.5}]}
+    {id:'demo-bag',name:'发财包',category:'包包',cost:10,wholesalePrice:15,retail:29,packaging:0.5,supplier:'',note:'内置商品案例，可按实际情况修改商品和价格。',tiers:[]},
+    {id:'demo-hat',name:'鸭舌帽',category:'帽子',cost:8,wholesalePrice:11,retail:35,packaging:0.5,supplier:'',note:'内置商品案例，可自行修改；建议零售价 35 元暂为参考，请按实际情况核实。',tiers:[]}
   ],customers:[{id:'demo-customer',name:'示例客户 · 小林',contact:'抖音私信',discount:9,note:'练习用：首次拿货，先看 50 件的报价。',productPrices:{},productDiscounts:{}}]};
+}
+const oldDemoProducts = [
+  {id:'demo-bag',name:'日常帆布托特包',category:'包包',cost:22,wholesalePrice:30,retail:59,packaging:1,supplier:'示例厂家 A',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:20},{minQty:100,cost:18}]},
+  {id:'demo-hat',name:'百搭软檐棒球帽',category:'帽子',cost:12,wholesalePrice:18,retail:35,packaging:0.5,supplier:'示例厂家 B',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:10.5}]}
+];
+function sameRecord(left,right) {
+  if(left===right) return true;
+  if(!left||!right||typeof left!=='object'||typeof right!=='object'||Array.isArray(left)!==Array.isArray(right)) return false;
+  const keys=Object.keys(left);
+  return keys.length===Object.keys(right).length&&keys.every(key=>Object.hasOwn(right,key)&&sameRecord(left[key],right[key]));
+}
+function refreshUneditedDemoProducts(data) {
+  const defaults=demoData().products;
+  data.products=data.products.map(product=>{
+    const old=oldDemoProducts.find(seed=>seed.id===product.id);
+    if(!old||(product.wholesalePrice!==null&&product.wholesalePrice!==old.wholesalePrice)) return product;
+    // Only exact old seeds qualify. Edited fields, tiers and extra metadata are preserved.
+    return sameRecord(product,{...old,wholesalePrice:product.wholesalePrice})
+      ? defaults.find(seed=>seed.id===product.id) : product;
+  });
+  return data;
 }
 function isObject(v) { return !!v && typeof v==='object' && !Array.isArray(v); }
 function text(v,max=500) { return typeof v==='string' && v.length<=max; }
@@ -57,7 +78,7 @@ export function validateData(value) {
 }
 export function readData(storage=globalThis.localStorage) {
   const raw=storage.getItem(STORAGE_KEY);
-  return raw===null ? demoData() : validateData(JSON.parse(raw));
+  return raw===null ? demoData() : refreshUneditedDemoProducts(validateData(JSON.parse(raw)));
 }
 export function writeData(data,storage=globalThis.localStorage) {
   const valid=validateData(data);valid.updatedAt=new Date().toISOString();

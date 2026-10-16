@@ -27,8 +27,15 @@ function quotation() {
   };
 }
 
+function oldDemoData() {
+  return {...demoData(),products:[
+    {id:'demo-bag',name:'日常帆布托特包',category:'包包',cost:22,wholesalePrice:30,retail:59,packaging:1,supplier:'示例厂家 A',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:20},{minQty:100,cost:18}]},
+    {id:'demo-hat',name:'百搭软檐棒球帽',category:'帽子',cost:12,wholesalePrice:18,retail:35,packaging:0.5,supplier:'示例厂家 B',note:'这是练习商品，价格仅用于演示。',tiers:[{minQty:50,cost:10.5}]}
+  ]};
+}
+
 function legacyData() {
-  const data = demoData();
+  const data = oldDemoData();
   data.version = 1;
   for (const p of data.products) delete p.wholesalePrice;
   for (const c of data.customers) {
@@ -42,7 +49,7 @@ function legacyData() {
   return data;
 }
 
-test('first use returns clearly marked practice data without writing into storage', () => {
+test('first use contains the current two editable product examples without writing storage', () => {
   const storage = memoryStorage();
   const data = readData(storage);
   assert.equal(data.demo, true);
@@ -50,15 +57,90 @@ test('first use returns clearly marked practice data without writing into storag
   assert.equal(data.customers.length, 1);
   assert.equal(data.quotes.length, 0);
   assert.equal(data.version, 2);
-  assert.deepEqual(data.products.map(p => p.wholesalePrice), [30, 18]);
+  assert.deepEqual(data.products.map(p => p.name), ['发财包', '鸭舌帽']);
+  assert.deepEqual(data.products.map(p => p.cost), [10, 8]);
+  assert.deepEqual(data.products.map(p => p.wholesalePrice), [15, 11]);
+  assert.deepEqual(data.products.map(p => p.retail), [29, 35]);
+  assert.deepEqual(data.products.map(p => p.packaging), [0.5, 0.5]);
+  assert.deepEqual(data.products.map(p => p.tiers), [[], []]);
+  for (const quantity of [1, 50, 100]) {
+    assert.deepEqual(data.products.map(p => getPurchaseCost(p, quantity)), [10, 8]);
+  }
   assert.equal(data.customers[0].discount, 9);
   assert.deepEqual(data.customers[0].productDiscounts, {});
   assert.match(data.customers[0].note, /50 件/);
-  assert.match(data.products[0].note, /演示/);
+  assert.match(data.products[0].note, /可.*修改/);
+  assert.match(data.products[1].note, /35 元.*参考.*核实/);
   assert.match(data.customers[0].name, /示例/);
   assert.deepEqual(storage.reads, [STORAGE_KEY]);
   assert.deepEqual(storage.writes, []);
   assert.doesNotThrow(() => validateData(data));
+});
+
+test('reading old unchanged examples refreshes both products and preserves customer and quote snapshots', () => {
+  for (const legacyWholesale of [false, true]) {
+    const source = oldDemoData();
+    source.demo = false;
+    source.quotes.push(quotation());
+    source.customers[0].productPrices = { 'demo-bag': 17 };
+    source.customers[0].productDiscounts = { 'demo-bag': 8.5 };
+    source.updatedAt = '2026-10-16T01:00:00.000Z';
+    if (legacyWholesale) for (const product of source.products) product.wholesalePrice = null;
+    const raw = JSON.stringify(source), storage = memoryStorage(raw), updated = readData(storage);
+    assert.deepEqual(updated.products, demoData().products);
+    assert.deepEqual(updated.customers, source.customers);
+    assert.deepEqual(updated.quotes, source.quotes);
+    assert.deepEqual(updated.settings, source.settings);
+    assert.equal(updated.demo, source.demo);
+    assert.equal(updated.updatedAt, source.updatedAt);
+    assert.equal(storage.getItem(STORAGE_KEY), raw);
+    assert.deepEqual(storage.writes, []);
+  }
+});
+
+test('version 1 old examples refresh only when reading storage and keep all historical amounts', () => {
+  const source = legacyData(), raw = JSON.stringify(source), storage = memoryStorage(raw);
+  const updated = readData(storage), validated = validateData(source);
+  assert.deepEqual(updated.products, demoData().products);
+  assert.deepEqual(updated.customers, validated.customers);
+  assert.deepEqual(updated.quotes, validated.quotes);
+  assert.equal(updated.quotes[0].input.purchaseCost, 22);
+  assert.equal(updated.quotes[0].input.unitPrice, 39);
+  assert.equal(updated.quotes[0].result.profit, 222);
+  assert.equal(storage.getItem(STORAGE_KEY), raw);
+  assert.deepEqual(storage.writes, []);
+});
+
+test('refresh never replaces edited or custom product records, including supplier, note and tiers', () => {
+  const changes = [
+    p => { p.id = 'my-bag'; }, p => { p.name = '自己的帆布包'; },
+    p => { p.category = '其他'; }, p => { p.cost = 21; },
+    p => { p.wholesalePrice = 31; }, p => { p.retail = 58; },
+    p => { p.packaging = 0.8; }, p => { p.supplier = '真正的厂家'; },
+    p => { p.note = '自己的记录'; }, p => { p.tiers[0].cost = 19; },
+    p => { p.tiers[0].minQty = 51; }, p => { p.tiers = []; },
+    p => { p.tiers.reverse(); }, p => { p.privateMetadata = 'keep'; },
+    p => { p.tiers[0].note = 'keep'; },
+  ];
+  for (const change of changes) {
+    const source = oldDemoData(); change(source.products[0]);
+    const raw = JSON.stringify(source), storage = memoryStorage(raw), updated = readData(storage);
+    assert.deepEqual(updated.products[0], source.products[0]);
+    assert.deepEqual(updated.products[1], demoData().products[1]);
+    assert.equal(storage.getItem(STORAGE_KEY), raw);
+    assert.deepEqual(storage.writes, []);
+  }
+});
+
+test('validating or restoring a backup never refreshes old examples', () => {
+  const source = oldDemoData();
+  assert.deepEqual(validateData(source), source);
+  assert.deepEqual(parseBackup(JSON.stringify(source)), source);
+  assert.deepEqual(parseBackup(backupText(source)), source);
+  const legacy = legacyData(), migrated = validateData(legacy);
+  assert.equal(migrated.products[0].name, '日常帆布托特包');
+  assert.deepEqual(parseBackup(backupText(legacy)), migrated);
+  assert.deepEqual(parseBackup(JSON.stringify(legacy)), migrated);
 });
 
 test('empty formal data remains empty on reload and never gets demo records appended', () => {
@@ -72,15 +154,15 @@ test('empty formal data remains empty on reload and never gets demo records appe
 test('demo, empty and validated objects do not share editable nested state', () => {
   const source = demoData();
   const copy = validateData(source);
-  copy.products[0].tiers[0].cost = 1;
+  copy.products[0].tiers.push({ minQty: 50, cost: 1 });
   copy.customers[0].productPrices['demo-bag'] = 30;
   copy.customers[0].productDiscounts['demo-bag'] = 7;
   copy.settings.targetMargin = 10;
-  assert.equal(source.products[0].tiers[0].cost, 20);
+  assert.deepEqual(source.products[0].tiers, []);
   assert.deepEqual(source.customers[0].productPrices, {});
   assert.deepEqual(source.customers[0].productDiscounts, {});
   assert.equal(source.settings.targetMargin, 25);
-  assert.equal(demoData().products[0].tiers[0].cost, 20);
+  assert.deepEqual(demoData().products[0].tiers, []);
   assert.notEqual(emptyData().products, emptyData().products);
 });
 
@@ -194,7 +276,7 @@ test('unset wholesale bases and quote bases stay explicitly null without retail 
   const quote = quotation(); quote.basePrice = null; data.quotes.push(quote);
   const restored = parseBackup(backupText(data));
   assert.equal(restored.products[0].wholesalePrice, null);
-  assert.equal(restored.products[0].retail, 59);
+  assert.equal(restored.products[0].retail, 29);
   assert.equal(restored.quotes[0].basePrice, null);
   assert.deepEqual(restored.quotes[0].input, quote.input);
 });
@@ -250,7 +332,7 @@ test('backup validation rejects invalid prices, impossible discounts and duplica
 test('procurement tiers reject duplicate thresholds, fractional quantities and negative costs', () => {
   for (const tier of [{ minQty: 50, cost: 19 }, { minQty: 2.5, cost: 19 },
     { minQty: 0, cost: 19 }, { minQty: 20, cost: -1 }]) {
-    const data = demoData(); data.products[0].tiers.push(tier);
+    const data = demoData(); data.products[0].tiers.push({ minQty: 50, cost: 10 }, tier);
     assert.throws(() => validateData(data), /采购阶梯/);
   }
 });
@@ -283,7 +365,7 @@ test('backup validation rejects sub-cent values that the pricing engine cannot c
     d => { d.products[0].retail = 59.000000001; },
     d => { d.products[0].wholesalePrice = 30.000000001; },
     d => { d.products[0].packaging = 1.000000001; },
-    d => { d.products[0].tiers[0].cost = 20.000000001; },
+    d => { d.products[0].tiers.push({ minQty: 50, cost: 20.000000001 }); },
     d => { d.customers[0].productPrices['demo-bag'] = 39.000000001; },
     d => { d.quotes[0].retail = 59.000000001; },
     d => { d.quotes[0].basePrice = 45.000000001; },
@@ -319,7 +401,7 @@ test('valid cents and harmless floating-point noise remain usable after backup r
     const data = demoData(), quote = quotation();
     data.products[0].cost = value;
     data.products[0].wholesalePrice = value;
-    data.products[0].tiers[0].cost = value;
+    data.products[0].tiers.push({ minQty: 50, cost: value });
     data.customers[0].discount = 8.55;
     data.customers[0].productPrices['demo-bag'] = value;
     data.customers[0].productDiscounts['demo-bag'] = 8.55;

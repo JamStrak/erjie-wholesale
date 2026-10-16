@@ -174,11 +174,68 @@ export function formatMoney(value) {
   }).format(Object.is(value, -0) ? 0 : value);
 }
 
-export function discountLabel(unitPrice, retail) {
+/** 折扣以折前批发单价为基准，先将单件成交价按分四舍五入。 */
+export function discountedPrice(basePrice, discount) {
+  const price = decimal(basePrice, '折前单价');
+  const rate = decimal(discount, '折扣', 10);
+  return yuan((price * rate + 500n) / 1_000n);
+}
+
+/** 客户全部按建议零售价卖完时的空间，尚未扣除客户后续售卖费用。 */
+export function calculateResale(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('请填写完整的客户转售信息');
+  }
+  const quantity = quantityValue(input.quantity);
+  const count = BigInt(quantity);
+  const unitPrice = decimal(input.unitPrice, '客户拿货单价');
+  const retail = decimal(input.retail, '建议零售价');
+  const shippingCost = decimal(input.customerShipping, '客户支付运费');
+  const revenue = retail * count;
+  const goodsCost = unitPrice * count;
+  const totalCost = goodsCost + shippingCost;
+  const profit = revenue - totalCost;
+  return {
+    revenue: yuan(revenue),
+    goodsCost: yuan(goodsCost),
+    shippingCost: yuan(shippingCost),
+    totalCost: yuan(totalCost),
+    profit: yuan(profit),
+    unitProfit: yuan(profit) / quantity,
+    margin: revenue === 0n ? 0 : Number(profit) / Number(revenue) * 100,
+  };
+}
+
+/** 客户商品专属折前价/折扣优先，缺少折前价时明确返回 null。 */
+export function getCustomerPricing(product, customer) {
+  if (!product || typeof product !== 'object' || Array.isArray(product)
+      || typeof product.id !== 'string' || !product.id.trim()) {
+    throw new Error('商品报价信息无效');
+  }
+  if (customer != null && (typeof customer !== 'object' || Array.isArray(customer))) {
+    throw new Error('客户报价信息无效');
+  }
+  const readPrice = (map, name) => {
+    if (map === undefined || map === null) return undefined;
+    if (typeof map !== 'object' || Array.isArray(map)) throw new Error(`${name}须为商品价格表`);
+    return Object.prototype.hasOwnProperty.call(map, product.id) ? map[product.id] : undefined;
+  };
+  const base = readPrice(customer?.productPrices, '客户商品单价') ?? product.wholesalePrice ?? null;
+  const rate = readPrice(customer?.productDiscounts, '客户商品折扣') ?? customer?.discount ?? 10;
+  const discount = yuan(decimal(rate, '客户折扣', 10));
+  const basePrice = base === null ? null : yuan(decimal(base, '折前单价'));
+  return {
+    basePrice,
+    discount,
+    unitPrice: basePrice === null ? null : discountedPrice(basePrice, discount),
+  };
+}
+
+export function discountLabel(unitPrice, basePrice) {
   const price = decimal(unitPrice, '单件售价');
-  const regular = decimal(retail, '零售价');
-  if (regular === 0n) return '未设零售价';
-  if (price > regular) return '高于零售价';
+  const regular = decimal(basePrice, '折前单价');
+  if (regular === 0n) return '未设折前单价';
+  if (price > regular) return '高于折前单价';
   const discount = Number(price) / Number(regular) * 10;
   return `${Number(discount.toFixed(2))}折`;
 }

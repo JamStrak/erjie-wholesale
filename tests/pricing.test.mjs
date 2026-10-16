@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateQuote, getPurchaseCost, formatMoney, discountLabel } from '../pricing.js';
+import { calculateQuote, getPurchaseCost, formatMoney, discountLabel, discountedPrice, calculateResale, getCustomerPricing } from '../pricing.js';
 
 const base = {
   quantity: 10,
@@ -155,7 +155,7 @@ test('阶梯拒绝无效或重复门槛，即使该阶梯尚未达到也要校�
   assert.throws(() => getPurchaseCost({ cost: 1 }, ''));
 });
 
-test('价格展示、折扣与零售价边界', () => {
+test('价格展示、折扣以折前批发单价为基准', () => {
   assert.equal(formatMoney(1234.5), '1,234.50');
   assert.equal(formatMoney(-12), '-12.00');
   assert.equal(formatMoney(-0), '0.00');
@@ -163,7 +163,112 @@ test('价格展示、折扣与零售价边界', () => {
   assert.equal(discountLabel(15, 20), '7.5折');
   assert.equal(discountLabel(20, 20), '10折');
   assert.equal(discountLabel(0, 20), '0折');
-  assert.equal(discountLabel(20.01, 20), '高于零售价');
-  assert.equal(discountLabel(15, 0), '未设零售价');
+  assert.equal(discountLabel(20.01, 20), '高于折前单价');
+  assert.equal(discountLabel(15, 0), '未设折前单价');
   assert.throws(() => discountLabel('', 20));
+});
+
+test('客户折扣先按单件价格精确到分，恰好半分向上舍入', () => {
+  assert.equal(discountedPrice(30, 8), 24);
+  assert.equal(discountedPrice(20.01, 5), 10.01);
+  assert.equal(discountedPrice(0.01, 4.99), 0);
+  assert.equal(discountedPrice(0.01, 5), 0.01);
+  assert.equal(discountedPrice('12.34', '8.88'), 10.96);
+  assert.equal(discountedPrice(0, 10), 0);
+  assert.equal(discountedPrice(1000000, 0), 0);
+  assert.equal(discountedPrice(1000000, 10), 1000000);
+  assert.equal(discountedPrice(0.1 + 0.2, 10), 0.3);
+  const quote = calculateQuote({ ...base, quantity: 50, unitPrice: discountedPrice(20.01, 5) });
+  assert.equal(quote.goodsRevenue, 500.5);
+});
+
+test('折前价和折扣拒绝非法值及超过两位小数', () => {
+  for (const value of ['', ' ', null, undefined, NaN, Infinity, -1, true, {}, [], 0.001]) {
+    assert.throws(() => discountedPrice(value, 8), /[\u4e00-\u9fff]/);
+    assert.throws(() => discountedPrice(30, value), /[\u4e00-\u9fff]/);
+  }
+  assert.throws(() => discountedPrice(1000000.01, 8));
+  assert.throws(() => discountedPrice(30, 10.01));
+  assert.throws(() => discountedPrice(30, '8.888'));
+});
+
+test('客户按建议零售价全部售出，空间扣除拿货成本和客户另付运费', () => {
+  const result = calculateResale({ quantity: 50, unitPrice: 24, retail: 59, customerShipping: 12 });
+  assert.deepEqual(result, {
+    revenue: 2950,
+    goodsCost: 1200,
+    shippingCost: 12,
+    totalCost: 1212,
+    profit: 1738,
+    unitProfit: 34.76,
+    margin: 1738 / 2950 * 100,
+  });
+  const withoutShipping = calculateResale({ quantity: 50, unitPrice: 24, retail: 59, customerShipping: 0 });
+  assert.equal(withoutShipping.profit - result.profit, 12);
+});
+
+test('客户转售空间可以为负，零收入不会出现百分比异常', () => {
+  assert.deepEqual(calculateResale({ quantity: 1, unitPrice: 0.03, retail: 0.02, customerShipping: 0.01 }), {
+    revenue: 0.02, goodsCost: 0.03, shippingCost: 0.01, totalCost: 0.04,
+    profit: -0.02, unitProfit: -0.02, margin: -100,
+  });
+  const zero = calculateResale({ quantity: 50, unitPrice: 24, retail: 0, customerShipping: 12 });
+  assert.equal(zero.profit, -1212);
+  assert.equal(zero.margin, 0);
+  const large = calculateResale({ quantity: 100000, unitPrice: 1000000, retail: 1000000, customerShipping: 1000000 });
+  assert.equal(large.revenue, 100000000000);
+  assert.equal(large.totalCost, 100001000000);
+  assert.equal(large.profit, -1000000);
+});
+
+test('客户转售信息逐字段校验，支持正常表单字符串', () => {
+  const input = { quantity: 50, unitPrice: 24.01, retail: 59, customerShipping: 12 };
+  const strings = Object.fromEntries(Object.entries(input).map(([key, value]) => [key, String(value)]));
+  assert.deepEqual(calculateResale(strings), calculateResale(input));
+  for (const field of Object.keys(input)) {
+    for (const value of ['', ' ', null, undefined, NaN, Infinity, -1, true, {}, [], 0.001]) {
+      assert.throws(() => calculateResale({ ...input, [field]: value }), /[\u4e00-\u9fff]/, `${field}: ${String(value)}`);
+    }
+  }
+  for (const quantity of [0, 1.5, 100001]) assert.throws(() => calculateResale({ ...input, quantity }));
+  for (const field of ['unitPrice', 'retail', 'customerShipping']) assert.throws(() => calculateResale({ ...input, [field]: 1000000.01 }));
+  for (const input of [null, undefined, [], 1]) assert.throws(() => calculateResale(input));
+});
+
+test('专属折前单价和专属折扣各自优先，不使用建议零售价打折', () => {
+  const product = Object.freeze({ id: 'bag', wholesalePrice: 30, retail: 59 });
+  const customer = Object.freeze({ discount: 8, productPrices: Object.freeze({ bag: 28 }), productDiscounts: Object.freeze({ bag: 9 }) });
+  assert.deepEqual(getCustomerPricing(product, customer), { basePrice: 28, discount: 9, unitPrice: 25.2 });
+  assert.deepEqual(getCustomerPricing(product, { discount: 8, productPrices: { bag: 28 } }), { basePrice: 28, discount: 8, unitPrice: 22.4 });
+  assert.deepEqual(getCustomerPricing(product, { discount: 8, productDiscounts: { bag: 9 } }), { basePrice: 30, discount: 9, unitPrice: 27 });
+  assert.deepEqual(getCustomerPricing(product, { discount: 8 }), { basePrice: 30, discount: 8, unitPrice: 24 });
+  assert.deepEqual(getCustomerPricing(product), { basePrice: 30, discount: 10, unitPrice: 30 });
+  assert.deepEqual(getCustomerPricing({ ...product, retail: 999 }, customer), getCustomerPricing(product, customer));
+});
+
+test('缺少批发折前价返回空值，零价格和零折扣保留，null 字段逐级回退', () => {
+  assert.deepEqual(getCustomerPricing({ id: 'bag', retail: 59 }, { discount: 8 }), { basePrice: null, discount: 8, unitPrice: null });
+  assert.deepEqual(getCustomerPricing({ id: 'bag', wholesalePrice: null }, null), { basePrice: null, discount: 10, unitPrice: null });
+  assert.deepEqual(getCustomerPricing({ id: 'bag', wholesalePrice: 0 }, { discount: 8 }), { basePrice: 0, discount: 8, unitPrice: 0 });
+  assert.deepEqual(getCustomerPricing({ id: 'bag', wholesalePrice: 30 }, { productPrices: { bag: 0 }, productDiscounts: { bag: 0 }, discount: 8 }), { basePrice: 0, discount: 0, unitPrice: 0 });
+  assert.deepEqual(getCustomerPricing({ id: 'bag', wholesalePrice: '30.00' }, { productPrices: { bag: null }, productDiscounts: { bag: null }, discount: '8.00' }), { basePrice: 30, discount: 8, unitPrice: 24 });
+  assert.deepEqual(getCustomerPricing({ id: 'bag', wholesalePrice: 30 }, { productPrices: Object.create({ bag: 1 }), productDiscounts: Object.create({ bag: 1 }) }), { basePrice: 30, discount: 10, unitPrice: 30 });
+});
+
+test('客户定价拒绝错误商品、价格表、单价和折扣', () => {
+  const product = { id: 'bag', wholesalePrice: 30 };
+  for (const value of [null, undefined, [], 1, {}, { id: '' }, { id: 1 }]) assert.throws(() => getCustomerPricing(value));
+  for (const value of [[], 1, '', true]) assert.throws(() => getCustomerPricing(product, value));
+  for (const field of ['productPrices', 'productDiscounts']) {
+    for (const value of [[], 1, '', true]) assert.throws(() => getCustomerPricing(product, { [field]: value }));
+  }
+  for (const value of ['', ' ', NaN, Infinity, -1, true, {}, [], 0.001, 1000000.01]) {
+    assert.throws(() => getCustomerPricing({ ...product, wholesalePrice: value }));
+    assert.throws(() => getCustomerPricing(product, { productPrices: { bag: value } }));
+  }
+  for (const value of ['', ' ', NaN, Infinity, -1, true, {}, [], 0.001, 10.01]) {
+    assert.throws(() => getCustomerPricing(product, { discount: value }));
+    assert.throws(() => getCustomerPricing(product, { productDiscounts: { bag: value } }));
+    assert.throws(() => getCustomerPricing({ id: 'bag' }, { discount: value }));
+  }
 });
